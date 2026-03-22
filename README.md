@@ -123,22 +123,6 @@ open index.html   # 或直接拖进浏览器
 
 -----
 
-## 部署
-
-**Netlify Drop（最简单）**
-
-1. 打开 [app.netlify.com/drop](https://app.netlify.com/drop)
-1. 上传 `index.html`
-1. 完成
-
-**Vercel**
-
-1. Fork 这个 repo
-1. 在 [vercel.com](https://vercel.com) 导入
-1. Framework: Other → Deploy
-
------
-
 ## 黑客松赛道
 
 |赛道                    |说明                                           |
