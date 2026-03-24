@@ -72,11 +72,20 @@ const SOL_RPC  = 'https://api.mainnet-beta.solana.com';
 const { Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } = solanaWeb3;
 
 async function getBalance(address) {
-  try {
-    const conn = new Connection(SOL_RPC, 'confirmed');
-    const bal  = await conn.getBalance(new PublicKey(address));
-    return bal / LAMPORTS_PER_SOL;
-  } catch { return null; }
+  // Try multiple RPC endpoints in case one is rate-limited
+  const rpcs = [
+    'https://api.mainnet-beta.solana.com',
+    'https://solana-mainnet.rpc.extrnode.com',
+    'https://rpc.ankr.com/solana',
+  ];
+  for (const rpc of rpcs) {
+    try {
+      const conn = new Connection(rpc, 'confirmed');
+      const bal  = await conn.getBalance(new PublicKey(address));
+      return bal / LAMPORTS_PER_SOL;
+    } catch(e) { console.warn('[RPC] getBalance failed on', rpc, e.message); }
+  }
+  return 0; // return 0, not null — so UI shows real 0 instead of fake 2.847
 }
 
 async function getLastActivity(address) {
@@ -193,30 +202,67 @@ function addLog(msg, type='info') {
 // ─── ACTIONS ──────────────────────────────────────────────────────────────────
 async function connect() {
   set({ loading:true, loadingMsg:'连接钱包中…' });
-  if (window?.solana?.isPhantom) {
+
+  // Check Phantom — wait up to 3s for solanaWeb3 CDN to load
+  let attempts = 0;
+  while (!window.solanaWeb3 && attempts++ < 6) await new Promise(r=>setTimeout(r,500));
+
+  const hasPhantom = window?.solana?.isPhantom;
+  console.log('[connect] Phantom detected:', hasPhantom, '| solanaWeb3:', !!window.solanaWeb3);
+
+  if (hasPhantom) {
+    // Step 1: Connect Phantom (fast — just wallet approval)
+    let addr;
     try {
       const resp = await window.solana.connect();
-      const addr = resp.publicKey.toString();
-      const [bal, lastTx] = await Promise.all([getBalance(addr), getLastActivity(addr)]);
-      // Fetch price from backend (uses Bitget Wallet Skill)
-      const pData = await apiGet(`/api/will/status?wallet=${addr}`);
-      const price = pData?.priceData?.price || 132.47;
-      set({ wallet:addr, demo:false, balance:bal??2.847,
-        lastActivity:lastTx??new Date(Date.now()-3*86400000),
-        solPrice:price, priceChange:pData?.priceData?.change||0,
-        priceSource:pData?.priceData?.source||'Bitget Wallet Skill',
-        will: pData?.will||null, willId:pData?.will?.id||null,
-        loading:false, screen: pData?.will ? 'dashboard' : 'setup' });
-      // If existing will found, start dashboard
-      if (pData?.will) setTimeout(initDashboard, 300);
+      addr = resp.publicKey.toString();
+      console.log('[connect] Phantom connected:', addr);
+    } catch(e) {
+      console.error('[connect] Phantom connect rejected:', e.message);
+      // User rejected — stay on landing, don't go demo
+      set({ loading:false });
       return;
-    } catch(e) { console.warn('Phantom connect failed:', e.message); }
+    }
+
+    // Step 2: Set wallet immediately so UI updates
+    set({ wallet:addr, demo:false, loading:true, loadingMsg:'加载链上数据…' });
+
+    // Step 3: Load RPC data + backend data in parallel (failures won't kill wallet connection)
+    const [bal, lastTx, pData] = await Promise.all([
+      getBalance(addr).catch(e => { console.warn('[RPC] balance:', e.message); return 0; }),
+      getLastActivity(addr).catch(() => null),
+      apiGet(`/api/will/status?wallet=${addr}`).catch(() => ({})),
+    ]);
+
+    const price = pData?.priceData?.price || null;
+    console.log('[connect] balance:', bal, '| price:', price, '| will:', pData?.will?.id);
+
+    set({
+      wallet:      addr,
+      demo:        false,
+      balance:     bal,                    // real balance, 0 if RPC failed (not fake 2.847)
+      lastActivity:lastTx ?? new Date(Date.now()-3*86400000),
+      solPrice:    price,
+      priceChange: pData?.priceData?.change ?? null,
+      priceSource: pData?.priceData?.source ?? '—',
+      will:        pData?.will  ?? null,
+      willId:      pData?.will?.id ?? null,
+      loading:     false,
+      screen:      pData?.will ? 'dashboard' : 'setup',
+    });
+
+    if (pData?.will) setTimeout(initDashboard, 300);
+    return;
   }
-  // Demo mode
-  set({ wallet:'Demo9xKmPQrTz8YwNjVbHcLsFu3aE6dG2iMo7p1Rn', demo:true,
+
+  // No Phantom — Demo mode
+  console.log('[connect] No Phantom found, entering Demo mode');
+  set({
+    wallet: 'Demo9xKmPQrTz8YwNjVbHcLsFu3aE6dG2iMo7p1Rn', demo:true,
     balance:2.847, lastActivity:new Date(Date.now()-3*86400000),
     solPrice:132.47, priceChange:1.84, priceSource:'Demo',
-    loading:false, screen:'setup' });
+    loading:false, screen:'setup',
+  });
 }
 
 async function checkSecurity() {
