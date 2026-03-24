@@ -72,28 +72,46 @@ const SOL_RPC  = 'https://api.mainnet-beta.solana.com';
 const { Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } = solanaWeb3;
 
 async function getBalance(address) {
-  // Try multiple RPC endpoints in case one is rate-limited
+  // Use direct fetch instead of solanaWeb3 SDK — avoids CDN timing issues
   const rpcs = [
     'https://api.mainnet-beta.solana.com',
-    'https://solana-mainnet.rpc.extrnode.com',
     'https://rpc.ankr.com/solana',
+    'https://solana-mainnet.g.alchemy.com/v2/demo',
   ];
   for (const rpc of rpcs) {
     try {
-      const conn = new Connection(rpc, 'confirmed');
-      const bal  = await conn.getBalance(new PublicKey(address));
-      return bal / LAMPORTS_PER_SOL;
+      const res = await fetch(rpc, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc:'2.0', id:1, method:'getBalance', params:[address] }),
+      });
+      const d = await res.json();
+      if (d.result?.value !== undefined) {
+        const sol = d.result.value / 1e9;
+        console.log('[RPC] balance from', rpc, ':', sol);
+        return sol;
+      }
     } catch(e) { console.warn('[RPC] getBalance failed on', rpc, e.message); }
   }
-  return 0; // return 0, not null — so UI shows real 0 instead of fake 2.847
+  console.warn('[RPC] all endpoints failed, returning 0');
+  return 0;
 }
 
 async function getLastActivity(address) {
+  // Direct fetch — no SDK dependency
   try {
-    const conn = new Connection(SOL_RPC, 'confirmed');
-    const sigs = await conn.getSignaturesForAddress(new PublicKey(address), { limit: 1 });
-    return sigs[0]?.blockTime ? new Date(sigs[0].blockTime * 1000) : null;
-  } catch { return null; }
+    const res = await fetch('https://api.mainnet-beta.solana.com', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc:'2.0', id:1, method:'getSignaturesForAddress', params:[address, { limit:1 }] }),
+    });
+    const d = await res.json();
+    const t = d.result?.[0]?.blockTime;
+    return t ? new Date(t * 1000) : null;
+  } catch(e) {
+    console.warn('[RPC] getLastActivity failed:', e.message);
+    return null;
+  }
 }
 
 // ── Create + sign a real Solana transfer transaction ──────────────────────────
