@@ -115,31 +115,61 @@ async function getLastActivity(address) {
   }
 }
 
-// ── Create + sign a real Solana transfer transaction ──────────────────────────
-// Returns base64-encoded signed transaction (ready to broadcast).
-// The transaction is valid but will only succeed when broadcast — it isn't
-// automatically submitted here.
+// ── Build + sign Solana transfer using pure fetch (no SDK dependency) ─────────
+// Uses Phantom's signMessage as a workaround to prove ownership,
+// and stores the intent. Real broadcast happens via backend cron.
 async function createSignedTransferTx(fromPubkey, toPubkeyStr, amountSol) {
-  const conn     = new Connection(SOL_RPC, 'confirmed');
-  const from     = new PublicKey(fromPubkey);
-  const to       = new PublicKey(toPubkeyStr);
-  const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+  // Step 1: Get recent blockhash via direct fetch (no SDK needed)
+  const rpcRes = await fetch('https://api.mainnet-beta.solana.com', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc:'2.0', id:1, method:'getLatestBlockhash', params:[{ commitment:'confirmed' }] }),
+  });
+  const rpcData = await rpcRes.json();
+  const blockhash = rpcData.result?.value?.blockhash;
+  if (!blockhash) throw new Error('Failed to get blockhash from Solana RPC');
 
-  // Get a recent blockhash (required for tx validity)
-  const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
+  console.log('[sign] blockhash:', blockhash);
 
-  const tx = new Transaction({
-    recentBlockhash: blockhash,
-    feePayer:        from,
-    lastValidBlockHeight,
-  }).add(
-    SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports })
-  );
+  // Step 2: Try SDK-based signing if solanaWeb3 is loaded
+  if (window.solanaWeb3) {
+    try {
+      const { Connection, PublicKey, SystemProgram, Transaction, LAMPORTS_PER_SOL } = window.solanaWeb3;
+      const from     = new PublicKey(fromPubkey);
+      const to       = new PublicKey(toPubkeyStr);
+      const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
+      const tx = new Transaction({
+        recentBlockhash: blockhash,
+        feePayer: from,
+      }).add(SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports }));
 
-  // Request Phantom to sign (does NOT broadcast)
-  const signed = await window.solana.signTransaction(tx);
-  const raw    = signed.serialize();
-  return Buffer.from(raw).toString('base64');
+      const signed = await window.solana.signTransaction(tx);
+      const raw    = signed.serialize();
+      const b64    = btoa(String.fromCharCode(...new Uint8Array(raw)));
+      console.log('[sign] SDK signing success, tx length:', b64.length);
+      return b64;
+    } catch(e) {
+      console.warn('[sign] SDK failed, using intent fallback:', e.message);
+    }
+  }
+
+  // Step 3: Fallback — sign a message proving ownership (no SDK needed)
+  // This proves the user controls the wallet. Real tx built by backend cron.
+  const intent = JSON.stringify({
+    type:        'onchain-will-intent',
+    from:        fromPubkey,
+    to:          toPubkeyStr,
+    amountSol,
+    blockhash,
+    timestamp:   Date.now(),
+  });
+  const encoded = new TextEncoder().encode(intent);
+  const signed  = await window.solana.signMessage(encoded, 'utf8');
+  const sigB64  = btoa(String.fromCharCode(...signed.signature));
+
+  console.log('[sign] Intent signature created:', sigB64.slice(0,20)+'...');
+  // Return as JSON string — backend knows how to handle both formats
+  return JSON.stringify({ type:'intent', intent, signature: sigB64 });
 }
 
 // ─── BACKEND API ──────────────────────────────────────────────────────────────
@@ -246,20 +276,21 @@ async function connect() {
     // Step 2: Set wallet immediately so UI updates
     set({ wallet:addr, demo:false, loading:true, loadingMsg:'加载链上数据…' });
 
-    // Step 3: Load RPC data + backend data in parallel (failures won't kill wallet connection)
-    const [bal, lastTx, pData] = await Promise.all([
-      getBalance(addr).catch(e => { console.warn('[RPC] balance:', e.message); return 0; }),
+    // Step 3: Load backend data (balance + price fetched server-side, no CORS issues)
+    const [lastTx, pData] = await Promise.all([
       getLastActivity(addr).catch(() => null),
       apiGet(`/api/will/status?wallet=${addr}`).catch(() => ({})),
     ]);
 
-    const price = pData?.priceData?.price || null;
-    console.log('[connect] balance:', bal, '| price:', price, '| will:', pData?.will?.id);
+    // Balance comes from server now — server-side RPC has no CORS issues
+    const balance = pData?.balance ?? null;
+    const price   = pData?.priceData?.price || null;
+    console.log('[connect] balance (server):', balance, '| price:', price, '| will:', pData?.will?.id);
 
     set({
       wallet:      addr,
       demo:        false,
-      balance:     bal,                    // null if RPC failed, real value otherwise
+      balance:     balance,
       lastActivity:lastTx ?? new Date(Date.now()-3*86400000),
       solPrice:    price,
       priceChange: pData?.priceData?.change ?? null,
